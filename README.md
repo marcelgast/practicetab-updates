@@ -16,8 +16,9 @@ ___
 
 PracticeTab is an offline-first desktop application.
 Internet access is only used for:
+
 	•	🔄 Checking for updates
-	•	🔐 License activation (future feature)
+	•	🔐 License activation
 
 This repository provides:
 	•	Versioned release artifacts (macOS & Windows)
@@ -27,6 +28,7 @@ This repository provides:
 ___
 
 ## How Updates Work
+
 	1.	The app starts
 	2.	The updater checks the latest GitHub Release
 	3.	The installed version is compared to the latest version
@@ -76,36 +78,6 @@ Examples:
 
 Only stable releases are offered to production users.
 Pre-release tags are used for testers.
-
-___
-
-## Access & Security
-	•	This repository is private
-	•	Updates are accessed using a read-only GitHub token
-	•	All update artifacts are cryptographically signed
-	•	The app will refuse unsigned or tampered updates
-
-___
-
-## For Testers
-
-If you are testing PracticeTab:
-	•	You do not need to clone this repository
-	•	Updates will be delivered automatically via the app
-	•	If an update fails:
-	•	Restart the app
-	•	Check the release notes
-	•	Report the issue to the developer
-
-___
-
-## For Developers
-	•	Do not manually upload files
-	•	Always use the automated build workflow
-	•	Never remove existing releases
-	•	Never re-upload artifacts with the same version number
-
-Breaking these rules may invalidate updates for users.
 
 ___
 
