@@ -4,6 +4,12 @@ This repository hosts signed update artifacts for the PracticeTab desktop applic
 
 It is used exclusively by the app’s auto-update system and is not intended for direct use by end users.
 
+Download Links for PracticeTab:
+
+  - Windows MSI:
+    https://github.com/marcelgast/practicetab-updates/releases/latest/download/PracticeTab-latest.msi
+  - macOS DMG:
+    https://github.com/marcelgast/practicetab-updates/releases/latest/download/PracticeTab-latest.dmg
 ___
 
 ## Purpose
