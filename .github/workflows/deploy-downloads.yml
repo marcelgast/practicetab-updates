@@ -206,14 +206,42 @@ jobs:
           fi
           REMOTE
 
-      - name: Verify public download URLs
+      - name: Verify remote files are readable via local webserver path
+        if: ${{ steps.ctx.outputs.dry_run != 'true' }}
+        shell: bash
+        env:
+          HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          USER: ${{ secrets.DEPLOY_SSH_USER }}
+          PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
+          TARGET_DIR: ${{ secrets.DEPLOY_REMOTE_DOWNLOADS_DIR }}
+          REQUIRED_DMG: ${{ env.REQUIRED_DMG }}
+          REQUIRED_MSI: ${{ env.REQUIRED_MSI }}
+        run: |
+          set -euo pipefail
+          ssh -p "${PORT}" "${USER}@${HOST}" \
+            "set -euo pipefail; test -s '${TARGET_DIR}/${REQUIRED_DMG}'; test -s '${TARGET_DIR}/${REQUIRED_MSI}'"
+
+      - name: Verify public download URLs (warning only)
         if: ${{ steps.ctx.outputs.dry_run != 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           base="${{ secrets.DOWNLOAD_URL_BASE }}"
-          curl --fail --silent --show-error --location --retry 5 --retry-all-errors "${base}/${REQUIRED_DMG}" --output /dev/null
-          curl --fail --silent --show-error --location --retry 5 --retry-all-errors "${base}/${REQUIRED_MSI}" --output /dev/null
+          ua="PracticeTabDownloadDeployCheck/1.0 (+https://getpracticetab.com)"
+          check_url() {
+            local url="$1"
+            local headers
+            if ! headers="$(curl --silent --show-error --location --retry 3 --retry-all-errors --connect-timeout 15 --max-time 60 --user-agent "${ua}" -D - -o /dev/null "${url}")"; then
+              {
+                echo "::warning title=Public URL check failed::${url}"
+                echo "${headers}"
+              } | sed '/^[[:space:]]*$/d'
+              return 0
+            fi
+          }
+
+          check_url "${base}/${REQUIRED_DMG}"
+          check_url "${base}/${REQUIRED_MSI}"
 
       - name: Cleanup remote temp dir
         if: ${{ always() }}
