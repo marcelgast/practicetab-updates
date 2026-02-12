@@ -1,0 +1,244 @@
+name: Deploy Download Installers
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to deploy (for example v1.2.3)"
+        required: true
+        type: string
+      dry_run:
+        description: "Run all checks and upload to temp dir, but do not switch live files"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-downloads-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      REQUIRED_DMG: PracticeTab-latest.dmg
+      REQUIRED_MSI: PracticeTab-latest.msi
+    steps:
+      - name: Resolve deploy context
+        id: ctx
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            dry_run="false"
+          else
+            tag="${{ inputs.release_tag }}"
+            dry_run="${{ inputs.dry_run }}"
+          fi
+
+          if [[ -z "${tag}" ]]; then
+            echo "Release tag is required."
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "dry_run=${dry_run}" >> "${GITHUB_OUTPUT}"
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            DEPLOY_SSH_HOST
+            DEPLOY_SSH_USER
+            DEPLOY_SSH_PRIVATE_KEY
+            DEPLOY_REMOTE_DOWNLOADS_DIR
+            DEPLOY_REMOTE_TMP_DIR
+            DOWNLOAD_URL_BASE
+          )
+          missing=()
+          for key in "${required[@]}"; do
+            if [[ -z "${!key:-}" ]]; then
+              missing+=("${key}")
+            fi
+          done
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing required secrets:\n'
+            printf ' - %s\n' "${missing[@]}"
+            exit 1
+          fi
+        env:
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_PRIVATE_KEY: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+          DEPLOY_REMOTE_DOWNLOADS_DIR: ${{ secrets.DEPLOY_REMOTE_DOWNLOADS_DIR }}
+          DEPLOY_REMOTE_TMP_DIR: ${{ secrets.DEPLOY_REMOTE_TMP_DIR }}
+          DOWNLOAD_URL_BASE: ${{ secrets.DOWNLOAD_URL_BASE }}
+
+      - name: Download release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN_UPDATES != '' && secrets.GH_TOKEN_UPDATES || github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          gh release download "${{ steps.ctx.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "${REQUIRED_DMG}" \
+            --pattern "${REQUIRED_MSI}" \
+            --dir artifacts \
+            --clobber
+
+      - name: Verify artifacts
+        id: artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s "artifacts/${REQUIRED_DMG}"
+          test -s "artifacts/${REQUIRED_MSI}"
+          dmg_sha="$(sha256sum "artifacts/${REQUIRED_DMG}" | awk '{print $1}')"
+          msi_sha="$(sha256sum "artifacts/${REQUIRED_MSI}" | awk '{print $1}')"
+          echo "dmg_sha=${dmg_sha}" >> "${GITHUB_OUTPUT}"
+          echo "msi_sha=${msi_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}
+
+      - name: Configure known_hosts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          if [[ -n "${{ secrets.DEPLOY_KNOWN_HOSTS }}" ]]; then
+            printf '%s\n' "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -p "${{ secrets.DEPLOY_SSH_PORT || '22' }}" "${{ secrets.DEPLOY_SSH_HOST }}" > ~/.ssh/known_hosts
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Upload artifacts to remote temp dir
+        id: upload
+        shell: bash
+        env:
+          HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          USER: ${{ secrets.DEPLOY_SSH_USER }}
+          PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
+          REMOTE_TMP_BASE: ${{ secrets.DEPLOY_REMOTE_TMP_DIR }}
+        run: |
+          set -euo pipefail
+          remote_release_dir="${REMOTE_TMP_BASE}/release-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "remote_release_dir=${remote_release_dir}" >> "${GITHUB_OUTPUT}"
+
+          ssh -p "${PORT}" "${USER}@${HOST}" \
+            "set -euo pipefail; mkdir -p '${REMOTE_TMP_BASE}'; rm -rf '${remote_release_dir}'; mkdir -p '${remote_release_dir}'"
+
+          scp -P "${PORT}" "artifacts/${REQUIRED_DMG}" "artifacts/${REQUIRED_MSI}" "${USER}@${HOST}:${remote_release_dir}/"
+
+      - name: Atomic switch on remote (with rollback)
+        if: ${{ steps.ctx.outputs.dry_run != 'true' }}
+        shell: bash
+        env:
+          HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          USER: ${{ secrets.DEPLOY_SSH_USER }}
+          PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
+          TARGET_DIR: ${{ secrets.DEPLOY_REMOTE_DOWNLOADS_DIR }}
+          TMP_BASE: ${{ secrets.DEPLOY_REMOTE_TMP_DIR }}
+          RELEASE_DIR: ${{ steps.upload.outputs.remote_release_dir }}
+          KEEP_BACKUPS: "5"
+        run: |
+          set -euo pipefail
+
+          ssh -p "${PORT}" "${USER}@${HOST}" \
+            "TARGET_DIR='${TARGET_DIR}' TMP_BASE='${TMP_BASE}' RELEASE_DIR='${RELEASE_DIR}' REQUIRED_DMG='${REQUIRED_DMG}' REQUIRED_MSI='${REQUIRED_MSI}' KEEP_BACKUPS='${KEEP_BACKUPS}' bash -s" <<'REMOTE'
+          set -euo pipefail
+
+          backup_root="${TMP_BASE}/backups"
+          timestamp="$(date +%Y%m%d-%H%M%S)"
+          backup_dir="${backup_root}/backup-${timestamp}"
+          mkdir -p "${TARGET_DIR}" "${backup_root}"
+
+          test -s "${RELEASE_DIR}/${REQUIRED_DMG}"
+          test -s "${RELEASE_DIR}/${REQUIRED_MSI}"
+
+          rollback_required=false
+          if [[ -f "${TARGET_DIR}/${REQUIRED_DMG}" || -f "${TARGET_DIR}/${REQUIRED_MSI}" ]]; then
+            mkdir -p "${backup_dir}"
+            if [[ -f "${TARGET_DIR}/${REQUIRED_DMG}" ]]; then cp -f "${TARGET_DIR}/${REQUIRED_DMG}" "${backup_dir}/${REQUIRED_DMG}"; fi
+            if [[ -f "${TARGET_DIR}/${REQUIRED_MSI}" ]]; then cp -f "${TARGET_DIR}/${REQUIRED_MSI}" "${backup_dir}/${REQUIRED_MSI}"; fi
+            rollback_required=true
+          fi
+
+          rollback() {
+            if [[ "${rollback_required}" == "true" && -d "${backup_dir}" ]]; then
+              if [[ -f "${backup_dir}/${REQUIRED_DMG}" ]]; then cp -f "${backup_dir}/${REQUIRED_DMG}" "${TARGET_DIR}/${REQUIRED_DMG}"; fi
+              if [[ -f "${backup_dir}/${REQUIRED_MSI}" ]]; then cp -f "${backup_dir}/${REQUIRED_MSI}" "${TARGET_DIR}/${REQUIRED_MSI}"; fi
+            fi
+          }
+
+          trap rollback ERR
+
+          install -m 0644 "${RELEASE_DIR}/${REQUIRED_DMG}" "${TARGET_DIR}/${REQUIRED_DMG}.incoming"
+          install -m 0644 "${RELEASE_DIR}/${REQUIRED_MSI}" "${TARGET_DIR}/${REQUIRED_MSI}.incoming"
+          mv -f "${TARGET_DIR}/${REQUIRED_DMG}.incoming" "${TARGET_DIR}/${REQUIRED_DMG}"
+          mv -f "${TARGET_DIR}/${REQUIRED_MSI}.incoming" "${TARGET_DIR}/${REQUIRED_MSI}"
+
+          test -s "${TARGET_DIR}/${REQUIRED_DMG}"
+          test -s "${TARGET_DIR}/${REQUIRED_MSI}"
+
+          if [[ -d "${backup_root}" ]]; then
+            mapfile -t backups < <(ls -1dt "${backup_root}"/backup-* 2>/dev/null || true)
+            if (( ${#backups[@]} > KEEP_BACKUPS )); then
+              for old in "${backups[@]:KEEP_BACKUPS}"; do
+                rm -rf "${old}"
+              done
+            fi
+          fi
+          REMOTE
+
+      - name: Verify public download URLs
+        if: ${{ steps.ctx.outputs.dry_run != 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ secrets.DOWNLOAD_URL_BASE }}"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors "${base}/${REQUIRED_DMG}" --output /dev/null
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors "${base}/${REQUIRED_MSI}" --output /dev/null
+
+      - name: Cleanup remote temp dir
+        if: ${{ always() }}
+        shell: bash
+        env:
+          HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          USER: ${{ secrets.DEPLOY_SSH_USER }}
+          PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
+          RELEASE_DIR: ${{ steps.upload.outputs.remote_release_dir }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${RELEASE_DIR}" ]]; then
+            ssh -p "${PORT}" "${USER}@${HOST}" "set -euo pipefail; rm -rf '${RELEASE_DIR}'"
+          fi
+
+      - name: Deployment summary
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          {
+            echo "### Download deployment"
+            echo ""
+            echo "- Tag: \`${{ steps.ctx.outputs.tag }}\`"
+            echo "- Dry run: \`${{ steps.ctx.outputs.dry_run }}\`"
+            echo "- DMG SHA256: \`${{ steps.artifacts.outputs.dmg_sha || 'n/a' }}\`"
+            echo "- MSI SHA256: \`${{ steps.artifacts.outputs.msi_sha || 'n/a' }}\`"
+            echo "- Base URL: \`${{ secrets.DOWNLOAD_URL_BASE }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"

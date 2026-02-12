@@ -1,0 +1,11 @@
+.DS_Store
+Thumbs.db
+
+# IDE/editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Local workflow/debug artifacts
+artifacts/

@@ -64,6 +64,39 @@ All files are generated automatically via GitHub Actions.
 
 __
 
+## Download Deployment Workflow
+
+This repository now contains a production workflow:
+
+- `.github/workflows/deploy-downloads.yml`
+
+Behavior:
+- Triggered on release publish or manually via `workflow_dispatch`
+- Downloads `PracticeTab-latest.dmg` and `PracticeTab-latest.msi` from the selected release
+- Uploads artifacts to a remote temp directory
+- Performs an atomic switch on the server with rollback on failure
+- Verifies both public download URLs after deployment
+- Cleans temp files and keeps only the latest backup snapshots
+
+Required GitHub Actions secrets:
+
+- `DEPLOY_SSH_HOST`
+- `DEPLOY_SSH_USER`
+- `DEPLOY_SSH_PORT` (optional, default `22`)
+- `DEPLOY_SSH_PRIVATE_KEY`
+- `DEPLOY_REMOTE_DOWNLOADS_DIR`
+- `DEPLOY_REMOTE_TMP_DIR`
+- `DOWNLOAD_URL_BASE`
+- `DEPLOY_KNOWN_HOSTS` (optional but recommended)
+- `GH_TOKEN_UPDATES` (optional; required if default token cannot read release assets)
+
+Recommended:
+- Use a dedicated deploy key (not personal SSH key)
+- Protect the `production` environment in GitHub
+- Run one manual `dry_run` first after setup changes
+
+__
+
 Versioning
 
 Versions follow semantic versioning:
