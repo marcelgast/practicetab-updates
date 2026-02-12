@@ -221,6 +221,27 @@ jobs:
           ssh -p "${PORT}" "${USER}@${HOST}" \
             "set -euo pipefail; test -s '${TARGET_DIR}/${REQUIRED_DMG}'; test -s '${TARGET_DIR}/${REQUIRED_MSI}'"
 
+      - name: Capture remote deployment details
+        if: ${{ steps.ctx.outputs.dry_run != 'true' }}
+        id: remote_details
+        shell: bash
+        env:
+          HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          USER: ${{ secrets.DEPLOY_SSH_USER }}
+          PORT: ${{ secrets.DEPLOY_SSH_PORT || '22' }}
+          TARGET_DIR: ${{ secrets.DEPLOY_REMOTE_DOWNLOADS_DIR }}
+          REQUIRED_DMG: ${{ env.REQUIRED_DMG }}
+          REQUIRED_MSI: ${{ env.REQUIRED_MSI }}
+        run: |
+          set -euo pipefail
+          details="$(ssh -p "${PORT}" "${USER}@${HOST}" \
+            "set -euo pipefail; \
+             echo HOST=\$(hostname); \
+             echo TARGET_DIR='${TARGET_DIR}'; \
+             ls -lah '${TARGET_DIR}'; \
+             sha256sum '${TARGET_DIR}/${REQUIRED_DMG}' '${TARGET_DIR}/${REQUIRED_MSI}'")"
+          printf '%s\n' "${details}" >> "${GITHUB_STEP_SUMMARY}"
+
       - name: Verify public download URLs (warning only)
         if: ${{ steps.ctx.outputs.dry_run != 'true' }}
         shell: bash
