@@ -206,7 +206,7 @@ jobs:
           fi
           REMOTE
 
-      - name: Verify remote files are readable via local webserver path
+      - name: Verify remote files exist
         if: ${{ steps.ctx.outputs.dry_run != 'true' }}
         shell: bash
         env:
